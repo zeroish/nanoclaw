@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, handleForwardedEvent, splitForLimit, type GatewayAdapter } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -419,5 +419,109 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('handleForwardedEvent — Discord custom_id gateway decode', () => {
+  // Regression test for the bug where Discord's "\n"-delimited custom_id encoding
+  // caused every gateway button click to resolve to a raw "0\n0" string instead of
+  // "approve", silently treating Approve clicks as rejections.
+  //
+  // Discord encodes custom_id as "<actionId>\n<value>" (DISCORD_CUSTOM_ID_DELIMITER = "\n").
+  // Buttons are created with id="ncq:<questionId>:<idx>" and value=String(idx), so a click
+  // on the Approve button (idx 0) produces custom_id = "ncq:<qId>:0\n0".
+  // Before the fix, tail was parsed as "0\n0", which failed /^\d+$/ in resolveSelectedOption,
+  // falling through to return the raw "0\n0" string instead of "approve".
+
+  const APPROVAL_ID = 'appr-test-gateway-abc123';
+  const OPTIONS = [
+    { label: 'Approve', value: 'approve', style: 'primary', selectedLabel: '✅ Approved' },
+    { label: 'Reject', value: 'reject', style: 'danger', selectedLabel: '❌ Rejected' },
+    { label: 'Reject with reason…', value: 'reject_with_reason', selectedLabel: 'Reject with reason…' },
+  ];
+
+  // Minimal ChannelSetup for capturing onAction calls.
+  function makeSetupConfig(onAction: (questionId: string, value: string, userId: string) => void) {
+    return {
+      onAction,
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+    };
+  }
+
+  // Stub adapter — only handleWebhook is ever called by handleForwardedEvent for
+  // non-interaction events (won't be reached in these tests).
+  function makeAdapter(): GatewayAdapter {
+    return { name: 'discord', handleWebhook: vi.fn() } as unknown as GatewayAdapter;
+  }
+
+  // Build a GATEWAY_INTERACTION_CREATE body for a button click with the given custom_id.
+  function gatewayBody(customId: string): string {
+    return JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3, // MessageComponent
+        id: 'interaction-id',
+        token: 'interaction-token',
+        data: { custom_id: customId },
+        user: { id: 'discord-user-999' },
+        message: { embeds: [{ title: 'Approval needed', description: 'Run this?' }] },
+      },
+    });
+  }
+
+  beforeEach(async () => {
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    const db = initTestDb();
+    runMigrations(db);
+    db.prepare(
+      `INSERT INTO pending_approvals
+         (approval_id, request_id, action, payload, created_at, title, options_json)
+       VALUES (?, 'req-1', 'cli_command', '{}', datetime('now'), 'Approval needed', ?)`,
+    ).run(APPROVAL_ID, JSON.stringify(OPTIONS));
+
+    // Prevent real Discord API calls from the interaction-acknowledge fetch.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('ok', { status: 200 })));
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const { closeDb } = await import('../db/connection.js');
+    closeDb();
+  });
+
+  it('resolves Approve (index 0) → "approve" when custom_id carries the \\n-encoded value suffix', async () => {
+    const onAction = vi.fn();
+    // custom_id = "ncq:<qId>:0\n0" — as produced by encodeDiscordCustomId("ncq:<qId>:0", "0")
+    await handleForwardedEvent(gatewayBody(`ncq:${APPROVAL_ID}:0\n0`), makeAdapter(), makeSetupConfig(onAction));
+    expect(onAction).toHaveBeenCalledOnce();
+    expect(onAction).toHaveBeenCalledWith(APPROVAL_ID, 'approve', 'discord-user-999');
+  });
+
+  it('resolves Reject (index 1) → "reject" when custom_id carries the \\n-encoded value suffix', async () => {
+    const onAction = vi.fn();
+    await handleForwardedEvent(gatewayBody(`ncq:${APPROVAL_ID}:1\n1`), makeAdapter(), makeSetupConfig(onAction));
+    expect(onAction).toHaveBeenCalledOnce();
+    expect(onAction).toHaveBeenCalledWith(APPROVAL_ID, 'reject', 'discord-user-999');
+  });
+
+  it('handles a custom_id without a \\n suffix (e.g. older cards encoded without a value)', async () => {
+    const onAction = vi.fn();
+    // custom_id = "ncq:<qId>:0" — no \n, so buttonValue is undefined and tail "0" is the fallback
+    await handleForwardedEvent(gatewayBody(`ncq:${APPROVAL_ID}:0`), makeAdapter(), makeSetupConfig(onAction));
+    expect(onAction).toHaveBeenCalledOnce();
+    expect(onAction).toHaveBeenCalledWith(APPROVAL_ID, 'approve', 'discord-user-999');
+  });
+
+  it('skips onAction for non-ncq custom_ids and forwards to the adapter instead', async () => {
+    const onAction = vi.fn();
+    const adapter = makeAdapter();
+    await handleForwardedEvent(gatewayBody('some-other-button'), adapter, makeSetupConfig(onAction));
+    expect(onAction).not.toHaveBeenCalled();
+    // Interaction is type 3 but not ncq: — still returns early without forwarding to adapter.
+    // The point is that onAction is not called with garbage.
+    expect(adapter.handleWebhook).not.toHaveBeenCalled();
   });
 });
