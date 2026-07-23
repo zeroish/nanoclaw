@@ -462,11 +462,15 @@ async function buildContainerArgs(
 
   // Egress lockdown when enabled — throws if it can't be established, aborting
   // the spawn rather than running with open egress. Otherwise the host gateway.
-  if (ensureEgressNetwork()) {
+  // Per-group: full_egress=true bypasses lockdown for agents that require internet access.
+  if (ensureEgressNetwork() && !containerConfig.fullEgress) {
     args.push(...egressNetworkArgs());
     log.info('Egress lockdown active', { containerName, network: EGRESS_NETWORK });
   } else {
     args.push(...hostGatewayArgs());
+    if (containerConfig.fullEgress) {
+      log.info('Egress lockdown bypassed (full_egress=true)', { containerName });
+    }
   }
 
   // User mapping

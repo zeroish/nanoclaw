@@ -25,6 +25,7 @@ export interface ContainerConfigRow {
   packages_npm: string; // JSON: string[]
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
+  full_egress: number; // 0 = use global EGRESS_LOCKDOWN setting; 1 = bypass lockdown (full internet)
   updated_at: string;
 }
 
