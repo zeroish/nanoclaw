@@ -26,7 +26,7 @@ import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
-interface GatewayAdapter extends Adapter {
+export interface GatewayAdapter extends Adapter {
   startGatewayListener?(
     options: { waitUntil?: (task: Promise<unknown>) => void },
     durationMs?: number,
@@ -634,7 +634,7 @@ function startLocalWebhookServer(
   });
 }
 
-async function handleForwardedEvent(
+export async function handleForwardedEvent(
   body: string,
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
@@ -652,7 +652,13 @@ async function handleForwardedEvent(
     const interaction = event.data;
     // type 3 = MessageComponent (button/select)
     if (interaction.type === 3) {
-      const customId = (interaction.data as Record<string, unknown>)?.custom_id as string;
+      // Discord encodes custom_id as "<actionId>\n<value>" (DISCORD_CUSTOM_ID_DELIMITER = "\n").
+      // Decode to recover the plain actionId (button id) and the button's value separately,
+      // matching the split that handleComponentInteraction does in the webhook path.
+      const rawCustomId = (interaction.data as Record<string, unknown>)?.custom_id as string;
+      const nlIdx = rawCustomId?.indexOf('\n') ?? -1;
+      const customId = nlIdx >= 0 ? rawCustomId.slice(0, nlIdx) : rawCustomId;
+      const buttonValue = nlIdx >= 0 ? rawCustomId.slice(nlIdx + 1) : undefined;
       // In guilds the clicker is at interaction.member.user; in DMs it's interaction.user directly.
       const user =
         ((interaction.member as Record<string, unknown>)?.user as Record<string, string> | undefined) ??
@@ -676,9 +682,9 @@ async function handleForwardedEvent(
         ((interaction.message as Record<string, unknown>)?.embeds as Array<Record<string, unknown>>) || [];
       const originalDescription = (originalEmbeds[0]?.description as string) || '';
       const render = questionId ? getAskQuestionRender(questionId) : undefined;
-      // Discord custom_id mirrors the new index-based encoding (see Button
-      // construction). Decode back to the real option value for downstream.
-      const selectedOption = resolveSelectedOption(render, tail, tail);
+      // buttonValue is the decoded option index (e.g. "0" for Approve); tail is redundant
+      // but kept as a fallback for any custom_id that lacks the "\n<value>" suffix.
+      const selectedOption = resolveSelectedOption(render, buttonValue, tail);
       const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
       const matchedOpt = render?.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
