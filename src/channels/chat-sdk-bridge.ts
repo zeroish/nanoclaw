@@ -184,6 +184,28 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             log.warn('Failed to download attachment', { type: att.type, err });
           }
         }
+        // Adapters that expose a URL but not fetchData (e.g. Discord CDN links):
+        // download the bytes now so the session-manager can save them to the
+        // inbox and set localPath. Fall back to threading the URL through so
+        // the formatter produces form 2 instead of the bare fallback.
+        if (!entry.data && att.url) {
+          try {
+            const res = await fetch(att.url);
+            if (res.ok) {
+              const buf = Buffer.from(await res.arrayBuffer());
+              entry.data = buf.toString('base64');
+            } else {
+              log.warn('Attachment URL fetch returned non-OK status', {
+                type: att.type,
+                status: res.status,
+              });
+              entry.url = att.url;
+            }
+          } catch (err) {
+            log.warn('Failed to fetch attachment URL', { type: att.type, err });
+            entry.url = att.url;
+          }
+        }
         enriched.push(entry);
       }
       serialized.attachments = enriched;

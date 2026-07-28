@@ -8,6 +8,43 @@ vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
 }));
 
+// Stable object used to capture the onDirectMessage handler across the vi.mock
+// boundary. A module-level `let` would enter the TDZ before the hoisted
+// vi.mock factory closes over it; an object reference is safe.
+const _dmCapture: { handler: ((thread: unknown, msg: unknown) => Promise<void>) | undefined } = {
+  handler: undefined,
+};
+
+vi.mock('chat', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('chat')>();
+  return {
+    ...orig,
+    // Use a class so that `new Chat(...)` works in Vite SSR mode.
+    // vi.fn().mockImplementation(() => ({...})) is not constructable there.
+    Chat: class {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      private _state: any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      constructor(config: any) {
+        this._state = config?.state;
+      }
+      // Call state.connect() so SqliteStateAdapter.db is ready for subscribe().
+      async initialize() {
+        await this._state?.connect();
+      }
+      async shutdown() {}
+      onSubscribedMessage = vi.fn();
+      onNewMention = vi.fn();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      onDirectMessage(h: any) {
+        _dmCapture.handler = h;
+      }
+      onNewMessage = vi.fn();
+      onAction = vi.fn();
+    },
+  };
+});
+
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
 }
@@ -523,5 +560,131 @@ describe('handleForwardedEvent — Discord custom_id gateway decode', () => {
     // Interaction is type 3 but not ncq: — still returns early without forwarding to adapter.
     // The point is that onAction is not called with garbage.
     expect(adapter.handleWebhook).not.toHaveBeenCalled();
+  });
+});
+
+describe('messageToInbound — URL attachment enrichment', () => {
+  // When a Chat SDK adapter sets att.url but not att.fetchData (e.g. Discord CDN
+  // links), the bridge must fetch the content and store it as base64 data so that
+  // session-manager can save it to the inbox and set localPath (form 1). When the
+  // download fails, the bridge falls back to threading att.url through (form 2)
+  // instead of leaving both fields absent (bare form 3).
+
+  let capturedContent: Record<string, unknown> | undefined;
+
+  const hostSetup = {
+    onInbound: (_c: string, _t: string, msg: { content: unknown }) => {
+      capturedContent = msg.content as Record<string, unknown>;
+    },
+    onInboundEvent: () => {},
+    onMetadata: () => {},
+    onAction: () => {},
+  };
+
+  function makeDiscordStub() {
+    return stubAdapter({
+      name: 'discord',
+      initialize: async () => {},
+      channelIdFromThreadId: (tid: string) => `discord:${tid}`,
+    } as Partial<Adapter>);
+  }
+
+  function fakeDmMessage(atts: unknown[]) {
+    const author = { userId: 'u-1', fullName: 'Test User', userName: 'testuser', isBot: false, isMe: false };
+    return {
+      id: 'msg-att-test',
+      isMention: false,
+      raw: null,
+      author,
+      metadata: { dateSent: new Date('2026-01-01T00:00:00Z') },
+      attachments: atts,
+      toJSON: () => ({ id: 'msg-att-test', author, text: '', attachments: [] }),
+    };
+  }
+
+  beforeEach(async () => {
+    _dmCapture.handler = undefined;
+    capturedContent = undefined;
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    runMigrations(initTestDb());
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const { closeDb } = await import('../db/connection.js');
+    closeDb();
+  });
+
+  it('fetches att.url when fetchData is absent and stores result as base64 data', async () => {
+    const fakeBytes = Buffer.from('fake-image-bytes');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(fakeBytes, { status: 200 })));
+
+    const bridge = createChatSdkBridge({ adapter: makeDiscordStub(), supportsThreads: false });
+    await bridge.setup(hostSetup);
+    expect(_dmCapture.handler).toBeDefined();
+
+    await _dmCapture.handler!(
+      { id: 'thread-1' },
+      fakeDmMessage([
+        { type: 'image', name: 'photo.png', url: 'https://cdn.discordapp.com/photo.png', mimeType: 'image/png' },
+      ]),
+    );
+
+    const atts = capturedContent?.attachments as Array<{ data?: string; url?: string }>;
+    expect(atts).toHaveLength(1);
+    expect(atts[0].data).toBeDefined();
+    expect(Buffer.from(atts[0].data!, 'base64').toString()).toBe('fake-image-bytes');
+    expect(atts[0].url).toBeUndefined();
+
+    await bridge.teardown();
+  });
+
+  it('falls back to att.url when the download fails', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')));
+
+    const bridge = createChatSdkBridge({ adapter: makeDiscordStub(), supportsThreads: false });
+    await bridge.setup(hostSetup);
+
+    await _dmCapture.handler!(
+      { id: 'thread-1' },
+      fakeDmMessage([
+        { type: 'file', name: 'doc.pdf', url: 'https://cdn.discordapp.com/doc.pdf', mimeType: 'application/pdf' },
+      ]),
+    );
+
+    const atts = capturedContent?.attachments as Array<{ data?: string; url?: string }>;
+    expect(atts[0].url).toBe('https://cdn.discordapp.com/doc.pdf');
+    expect(atts[0].data).toBeUndefined();
+
+    await bridge.teardown();
+  });
+
+  it('still uses fetchData when available, ignoring att.url', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const fetchDataBytes = Buffer.from('from-fetch-data');
+    const bridge = createChatSdkBridge({ adapter: makeDiscordStub(), supportsThreads: false });
+    await bridge.setup(hostSetup);
+
+    await _dmCapture.handler!(
+      { id: 'thread-1' },
+      fakeDmMessage([
+        {
+          type: 'image',
+          name: 'img.jpg',
+          url: 'https://cdn.discordapp.com/img.jpg',
+          fetchData: async () => fetchDataBytes,
+        },
+      ]),
+    );
+
+    // fetch() should not have been called — fetchData takes priority
+    expect(fetchMock).not.toHaveBeenCalled();
+    const atts = capturedContent?.attachments as Array<{ data?: string }>;
+    expect(Buffer.from(atts[0].data!, 'base64').toString()).toBe('from-fetch-data');
+
+    await bridge.teardown();
   });
 });

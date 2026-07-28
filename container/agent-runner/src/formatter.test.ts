@@ -205,6 +205,83 @@ describe('XML escaping', () => {
   });
 });
 
+describe('attachment rendering', () => {
+  it('renders form 1 (localPath) as saved-to reference', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'see attached',
+      attachments: [{ type: 'image', name: 'photo.png', localPath: 'inbox/m1/photo.png' }],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[image: photo.png — saved to /workspace/inbox/m1/photo.png]');
+  });
+
+  it('renders form 2 (url) as linked reference when localPath is absent', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'see attached',
+      attachments: [{ type: 'file', name: 'report.pdf', url: 'https://cdn.example.com/report.pdf' }],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[file: report.pdf (https://cdn.example.com/report.pdf)]');
+  });
+
+  it('renders form 3 (bare) when neither localPath nor url is set', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'see attached',
+      attachments: [{ type: 'audio', name: 'clip.ogg' }],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[audio: clip.ogg]');
+    expect(result).not.toContain('saved to');
+    expect(result).not.toContain('(http');
+  });
+
+  it('prefers localPath over url when both are present', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'see attached',
+      attachments: [
+        {
+          type: 'image',
+          name: 'img.jpg',
+          localPath: 'inbox/m1/img.jpg',
+          url: 'https://cdn.example.com/img.jpg',
+        },
+      ],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('saved to /workspace/inbox/m1/img.jpg');
+    expect(result).not.toContain('(https://');
+  });
+
+  it('XML-escapes attachment name and url', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'file',
+      attachments: [{ type: 'file', name: 'a&b.txt', url: 'https://example.com/a&b' }],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('a&amp;b.txt');
+    expect(result).toContain('a&amp;b');
+  });
+
+  it('renders multiple attachments as separate lines', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'two files',
+      attachments: [
+        { type: 'image', name: 'a.png', localPath: 'inbox/m1/a.png' },
+        { type: 'file', name: 'b.pdf', url: 'https://cdn.example.com/b.pdf' },
+      ],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[image: a.png — saved to /workspace/inbox/m1/a.png]');
+    expect(result).toContain('[file: b.pdf (https://cdn.example.com/b.pdf)]');
+  });
+});
+
 describe('stripInternalTags', () => {
   it('strips single-line internal tags and trims', () => {
     expect(stripInternalTags('hello <internal>secret</internal> world')).toBe('hello  world');
