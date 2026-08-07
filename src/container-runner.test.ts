@@ -58,9 +58,7 @@ describe('full_egress gateway reachability under lockdown (structural)', () => {
   // structurally.
   it('uses fullEgressNetworkArgs, not hostGatewayArgs, when lockdown is active and full_egress is set', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
-    const branch = src.match(
-      /else if \(lockdownActive && containerConfig\.fullEgress\) \{([\s\S]*?)\n {2}\} else \{/,
-    );
+    const branch = src.match(/else if \(lockdownActive && containerConfig\.fullEgress\) \{([\s\S]*?)\n {2}\} else \{/);
     expect(branch).not.toBeNull();
     expect(branch![1]).toContain('fullEgressNetworkArgs()');
     expect(branch![1]).not.toContain('hostGatewayArgs()');

@@ -94,10 +94,7 @@ export function egressNetworkArgs(): string[] {
 
 /** Ensure the full-egress network (real internet, no lockdown) exists. */
 function ensureFullEgressNetwork(): void {
-  if (
-    !dockerOk(['network', 'inspect', FULL_EGRESS_NETWORK]) &&
-    !dockerOk(['network', 'create', FULL_EGRESS_NETWORK])
-  ) {
+  if (!dockerOk(['network', 'inspect', FULL_EGRESS_NETWORK]) && !dockerOk(['network', 'create', FULL_EGRESS_NETWORK])) {
     throw new EgressLockdownError(`the "${FULL_EGRESS_NETWORK}" network could not be created`);
   }
 }
