@@ -9,7 +9,7 @@
  */
 import { execFileSync } from 'child_process';
 
-import { EGRESS_LOCKDOWN, EGRESS_NETWORK, ONECLI_GATEWAY_CONTAINER } from './config.js';
+import { EGRESS_LOCKDOWN, EGRESS_NETWORK, FULL_EGRESS_NETWORK, ONECLI_GATEWAY_CONTAINER } from './config.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { log } from './log.js';
 
@@ -90,4 +90,24 @@ export function ensureEgressNetwork(): boolean {
 /** CLI args placing a container on the locked-down egress network. */
 export function egressNetworkArgs(): string[] {
   return ['--network', EGRESS_NETWORK];
+}
+
+/** Ensure the full-egress network (real internet, no lockdown) exists. */
+function ensureFullEgressNetwork(): void {
+  if (!dockerOk(['network', 'inspect', FULL_EGRESS_NETWORK]) && !dockerOk(['network', 'create', FULL_EGRESS_NETWORK])) {
+    throw new EgressLockdownError(`the "${FULL_EGRESS_NETWORK}" network could not be created`);
+  }
+}
+
+/**
+ * CLI args for a full_egress container under active lockdown: real internet via
+ * a dedicated bridge network, plus the locked-down egress network so it reaches
+ * the OneCLI gateway through the container alias instead of a published host
+ * port (which may be bound to loopback only). Call only after ensureEgressNetwork()
+ * has returned true — this assumes EGRESS_NETWORK and the gateway attachment
+ * already exist.
+ */
+export function fullEgressNetworkArgs(): string[] {
+  ensureFullEgressNetwork();
+  return ['--network', FULL_EGRESS_NETWORK, '--network', EGRESS_NETWORK];
 }

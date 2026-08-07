@@ -17,6 +17,7 @@ import {
   CONTAINER_INSTALL_LABEL,
   CONTAINER_MEMORY_LIMIT,
   DATA_DIR,
+  FULL_EGRESS_NETWORK,
   GROUPS_DIR,
   ONECLI_API_KEY,
   ONECLI_URL,
@@ -26,7 +27,7 @@ import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
-import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
+import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork, fullEgressNetworkArgs } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -462,15 +463,22 @@ async function buildContainerArgs(
 
   // Egress lockdown when enabled — throws if it can't be established, aborting
   // the spawn rather than running with open egress. Otherwise the host gateway.
-  // Per-group: full_egress=true bypasses lockdown for agents that require internet access.
-  if (ensureEgressNetwork() && !containerConfig.fullEgress) {
+  // Per-group: full_egress=true bypasses lockdown for agents that require internet
+  // access, but still needs the gateway — reached via EGRESS_NETWORK's container
+  // alias rather than hostGatewayArgs()'s published host port, which may be bound
+  // to loopback only.
+  const lockdownActive = ensureEgressNetwork();
+  if (lockdownActive && !containerConfig.fullEgress) {
     args.push(...egressNetworkArgs());
     log.info('Egress lockdown active', { containerName, network: EGRESS_NETWORK });
+  } else if (lockdownActive && containerConfig.fullEgress) {
+    args.push(...fullEgressNetworkArgs());
+    log.info('Egress lockdown bypassed (full_egress=true), gateway reached via egress network', {
+      containerName,
+      network: FULL_EGRESS_NETWORK,
+    });
   } else {
     args.push(...hostGatewayArgs());
-    if (containerConfig.fullEgress) {
-      log.info('Egress lockdown bypassed (full_egress=true)', { containerName });
-    }
   }
 
   // User mapping
