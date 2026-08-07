@@ -47,6 +47,31 @@ describe('buildContainerArgs ordering invariant (structural)', () => {
   });
 });
 
+describe('full_egress gateway reachability under lockdown (structural)', () => {
+  // full_egress agents (e.g. a messaging-relay agent that needs real internet)
+  // still need the OneCLI gateway for credential injection. hostGatewayArgs()
+  // reaches it via a published host port, which OneCLI may bind to loopback
+  // only — unreachable from a container. fullEgressNetworkArgs() reaches it via
+  // EGRESS_NETWORK's container-to-container alias instead, so it works
+  // regardless of the gateway's host port binding. Driving buildContainerArgs
+  // needs a live gateway + container runtime, so this guards the wiring
+  // structurally.
+  it('uses fullEgressNetworkArgs, not hostGatewayArgs, when lockdown is active and full_egress is set', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
+    const branch = src.match(
+      /else if \(lockdownActive && containerConfig\.fullEgress\) \{([\s\S]*?)\n {2}\} else \{/,
+    );
+    expect(branch).not.toBeNull();
+    expect(branch![1]).toContain('fullEgressNetworkArgs()');
+    expect(branch![1]).not.toContain('hostGatewayArgs()');
+  });
+
+  it('only falls back to hostGatewayArgs when lockdown itself is inactive', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
+    expect(src).toMatch(/\} else \{\n\s*args\.push\(\.\.\.hostGatewayArgs\(\)\);/);
+  });
+});
+
 describe('per-container resource limits (structural)', () => {
   // CONTAINER_CPU_LIMIT / CONTAINER_MEMORY_LIMIT pass through to `docker run` as
   // --cpus / --memory, but only when set. The default is empty string → no flag →

@@ -17,6 +17,7 @@ const envConfig = readEnvFile([
   'CONTAINER_MEMORY_LIMIT',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
+  'NANOCLAW_FULL_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
 ]);
 
@@ -84,6 +85,12 @@ export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envC
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
+// Real-internet network for full_egress agent groups under active lockdown. Kept
+// separate from the default bridge network so a full_egress container can also be
+// attached to EGRESS_NETWORK (Docker refuses to mix the default bridge with a
+// user-defined network on one container, but two user-defined networks combine fine).
+export const FULL_EGRESS_NETWORK =
+  process.env.NANOCLAW_FULL_EGRESS_NETWORK || envConfig.NANOCLAW_FULL_EGRESS_NETWORK || 'nanoclaw-full-egress';
 export const ONECLI_GATEWAY_CONTAINER =
   process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
 
